@@ -1,6 +1,6 @@
-# 🛠 Finanzas App — Backend (API)
+# Finanzas App — Backend (API)
 
-> API REST de la app de finanzas personales. **Next.js 15** (App Router) + **Prisma 6** + **PostgreSQL**.
+API REST de la aplicación de finanzas personales. **Next.js 15** (App Router) + **Prisma 6** + **PostgreSQL**.
 
 <p align="left">
   <img alt="Next.js" src="https://img.shields.io/badge/Next.js-15-000000?logo=nextdotjs&logoColor=white">
@@ -10,26 +10,27 @@
   <img alt="OpenAPI" src="https://img.shields.io/badge/OpenAPI-3.0.3-6BA539?logo=openapiinitiative&logoColor=white">
 </p>
 
-📦 Parte del monorepo **[Finanzas App](../../README.md)** · Puerto **3001**.
+Parte del monorepo **Finanzas App** (junto al frontend Angular PWA y la app iOS nativa). Puerto **3001**.
 
 ---
 
-## 📑 Contenido
+## Contenido
 
-- [Stack](#-stack)
-- [Estructura](#-estructura)
-- [Puesta en marcha](#-puesta-en-marcha)
-- [Variables de entorno](#-variables-de-entorno)
-- [Scripts](#-scripts)
-- [Autenticación](#-autenticación)
-- [Modelo de datos](#-modelo-de-datos)
-- [Endpoints](#-endpoints)
-- [Reglas de negocio](#-reglas-de-negocio)
-- [Documentación interactiva (Swagger)](#-documentación-interactiva-swagger)
+- [Stack](#stack)
+- [Estructura](#estructura)
+- [Puesta en marcha](#puesta-en-marcha)
+- [Variables de entorno](#variables-de-entorno)
+- [Scripts](#scripts)
+- [Autenticación](#autenticación)
+- [Modelo de datos](#modelo-de-datos)
+- [Endpoints](#endpoints)
+- [Reglas de negocio](#reglas-de-negocio)
+- [Documentación interactiva (Swagger)](#documentación-interactiva-swagger)
+- [Usuario demo](#usuario-demo)
 
 ---
 
-## 🧰 Stack
+## Stack
 
 - **Next.js 15** App Router (Route Handlers en `app/api/**/route.ts`).
 - **Prisma 6** ORM sobre **PostgreSQL**.
@@ -40,7 +41,7 @@
 
 ---
 
-## 📂 Estructura
+## Estructura
 
 ```
 apps/api/
@@ -77,32 +78,55 @@ apps/api/
 
 ---
 
-## 🚀 Puesta en marcha
+## Puesta en marcha
+
+### Requisitos
+
+- Node.js 20+
+- PostgreSQL 14+ corriendo en `localhost:5432`
+
+### Pasos
 
 ```bash
-# desde la raíz del monorepo
-cp .env.example apps/api/.env     # configura DB, JWT, AES, VAPID, WebAuthn
+# 1. Instalar dependencias
+npm install
 
-npm run db:migrate                # aplica migraciones Prisma
-npm run db:seed                   # categorías de sistema + usuario demo
+# 2. Configurar variables de entorno
+#    crea apps/api/.env con DATABASE_URL, secretos JWT, ENCRYPTION_KEY,
+#    claves VAPID y configuración WebAuthn (ver tabla más abajo)
 
-# arranca sólo la API
-npm run dev --workspace=apps/api  # → http://localhost:3001
+# 3. Migrar la base de datos y poblarla
+npm run db:migrate
+npm run db:seed
+
+# 4. Arrancar la API
+npm run dev                       # → http://localhost:3001
 ```
 
-> El cliente Prisma se genera automáticamente; si hace falta, `npm run db:generate --workspace=apps/api`.
+Desde la raíz del monorepo los mismos scripts se ejecutan con `--workspace=apps/api`
+(por ejemplo `npm run dev --workspace=apps/api`).
+
+El cliente Prisma se genera automáticamente; si hace falta, `npm run db:generate`.
 
 ---
 
-## 🔐 Variables de entorno
+## Variables de entorno
 
-Ver la [tabla completa en el README raíz](../../README.md#-variables-de-entorno).
-Resumen: `DATABASE_URL`, secretos/vigencias JWT, `ENCRYPTION_KEY`, claves `VAPID_*`,
-`WEBAUTHN_*` y `NEXT_PUBLIC_APP_URL`.
+Se definen en `apps/api/.env` (nunca se versiona; está en `.gitignore`):
+
+| Variable | Descripción |
+|----------|-------------|
+| `DATABASE_URL` | Cadena de conexión PostgreSQL. |
+| `JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET` | Secretos de firma JWT (mínimo 32 caracteres). |
+| `JWT_ACCESS_EXPIRES` / `JWT_REFRESH_EXPIRES` | Vigencia de tokens (`15m` / `7d`). |
+| `ENCRYPTION_KEY` | Clave AES-256 (32 caracteres) para datos sensibles. |
+| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | Web Push (notificaciones). |
+| `NEXT_PUBLIC_APP_URL` | URL pública del frontend. |
+| `WEBAUTHN_RP_ID` / `WEBAUTHN_RP_NAME` / `WEBAUTHN_ORIGIN` | Configuración WebAuthn/passkeys. |
 
 ---
 
-## 📜 Scripts
+## Scripts
 
 | Comando | Acción |
 |---------|--------|
@@ -115,11 +139,9 @@ Resumen: `DATABASE_URL`, secretos/vigencias JWT, `ENCRYPTION_KEY`, claves `VAPID
 | `npm run db:studio` | Prisma Studio. |
 | `npm run db:generate` | Regenera el cliente Prisma. |
 
-_(Ejecutar con `--workspace=apps/api` desde la raíz, o directamente dentro de `apps/api`.)_
-
 ---
 
-## 🔑 Autenticación
+## Autenticación
 
 ```mermaid
 sequenceDiagram
@@ -144,7 +166,7 @@ sequenceDiagram
 
 ---
 
-## 🗄 Modelo de datos
+## Modelo de datos
 
 **15 modelos** Prisma (`prisma/schema.prisma`), **5 migraciones**:
 
@@ -155,14 +177,14 @@ sequenceDiagram
 | Social | `SplitLink`, `SplitParticipant` |
 | Sistema | `SyncConflict`, `Notification` |
 
-El seed crea **30 categorías de sistema** (agrupadas por sección) y el [usuario demo](../../README.md#-usuario-demo).
+El seed crea **30 categorías de sistema** (agrupadas por sección) y el [usuario demo](#usuario-demo).
 
 ---
 
-## 🌐 Endpoints
+## Endpoints
 
-> Referencia rápida. La **fuente de verdad** es [`public/openapi.yaml`](public/openapi.yaml),
-> renderizada en `/api/docs`.
+Referencia rápida. La **fuente de verdad** es [`public/openapi.yaml`](public/openapi.yaml),
+renderizada en `/api/docs`.
 
 | Recurso | Métodos | Notas |
 |---------|---------|-------|
@@ -184,7 +206,7 @@ El seed crea **30 categorías de sistema** (agrupadas por sección) y el [usuari
 
 ---
 
-## 📐 Reglas de negocio
+## Reglas de negocio
 
 ### Notas especiales en `Transaction.notes`
 
@@ -194,7 +216,7 @@ El seed crea **30 categorías de sistema** (agrupadas por sección) y el [usuari
 | `'TDC_PAYMENT'` | Pago de tarjeta de crédito | excluido | excluido |
 | `null` / libre | Gasto/ingreso normal | incluido | incluido |
 
-### ⚠️ Filtros Prisma _null-safe_ (bug crítico documentado)
+### Filtros Prisma null-safe (bug crítico documentado)
 
 En Prisma 6, **tanto** `NOT: { notes: 'X' }` **como** `notes: { not: 'X' }` compilan a
 `NOT(notes = 'X')`, que para filas con `notes IS NULL` evalúa a `NULL` (falsy) → **descarta
@@ -218,14 +240,32 @@ OR: [
 - **MSI en cash-flow:** la vista "Te queda este mes" suma las **mensualidades** vencidas de
   los `MSICredit` activos, no la compra completa.
 - **Saldos de tarjeta:** `currentBalance` de una TDC = deuda al corte (`cutDebt`) + compras
-  post-corte; con _guard_ de fondos insuficientes en gastos/transferencias.
+  post-corte; con guard de fondos insuficientes en gastos/transferencias.
+
+### Convenciones transversales
+
+- **Montos:** decimales; PostgreSQL los serializa a veces como `string`.
+- **Fechas:** ISO 8601.
 
 ---
 
-## 📖 Documentación interactiva (Swagger)
+## Documentación interactiva (Swagger)
 
 - **UI:** `GET /api/docs` → http://localhost:3001/api/docs (Swagger UI vía CDN).
 - **Spec:** [`public/openapi.yaml`](public/openapi.yaml) (OpenAPI 3.0.3), servido estáticamente
   en `/openapi.yaml`. Cubre las 31 rutas de datos; editarlo no requiere rebuild.
 
 Autoriza con el botón **Authorize** pegando el `accessToken` (esquema `bearerAuth`).
+
+---
+
+## Usuario demo
+
+Tras ejecutar `npm run db:seed`:
+
+| Campo | Valor |
+|-------|-------|
+| Email | `demo@finanzas.app` |
+| Password | `demo1234` |
+| Plan | FREE |
+| Cuentas | Banamex Oro (TDC), Santander Débito, Efectivo |
