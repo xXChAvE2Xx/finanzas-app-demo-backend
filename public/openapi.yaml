@@ -1,0 +1,862 @@
+openapi: 3.0.3
+info:
+  title: Finanzas App API
+  description: |
+    API REST de la aplicación de finanzas personales (Next.js App Router + Prisma + PostgreSQL).
+
+    ## Autenticación
+    La mayoría de los endpoints requieren un **access token JWT** en el header
+    `Authorization: Bearer <token>`. El token se obtiene en `/auth/login` o `/auth/register`.
+    El **refresh token** se entrega como cookie `HttpOnly` (`refresh_token`) y se usa en `/auth/refresh`.
+
+    ## Convenciones
+    - Montos monetarios: número decimal (la API los serializa a veces como string desde PostgreSQL).
+    - Fechas: ISO 8601 (`YYYY-MM-DDTHH:mm:ss.sssZ`).
+    - Errores de validación → `422` con `{ error, details }`.
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:3001/api
+    description: Desarrollo local
+
+tags:
+  - name: Auth
+    description: Registro, login, sesión y refresh de tokens
+  - name: WebAuthn
+    description: Autenticación biométrica (passkeys)
+  - name: Accounts
+    description: Cuentas y tarjetas de crédito (TDC)
+  - name: Transactions
+    description: Movimientos (ingresos, gastos, transferencias)
+  - name: Categories
+    description: Categorías de movimientos (agrupadas por sección)
+  - name: MSI
+    description: Compras a meses (MSI / MEI)
+  - name: Recurring Income
+    description: Ingresos recurrentes (nómina)
+  - name: Cash Flow
+    description: Flujo libre y obligaciones
+  - name: Análisis
+    description: Distribución de gastos por categoría (pantalla Análisis)
+  - name: Split
+    description: Gastos compartidos / cobros
+  - name: Notifications
+    description: Suscripciones push
+  - name: Sync
+    description: Sincronización offline por lotes
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ───────────────────────── AUTH ─────────────────────────
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Crear cuenta
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, name]
+              properties:
+                email:    { type: string, format: email }
+                password: { type: string, minLength: 8 }
+                name:     { type: string, minLength: 2, maxLength: 100 }
+      responses:
+        '201':
+          description: Usuario creado; devuelve access token y datos de usuario
+          headers:
+            Set-Cookie: { schema: { type: string }, description: refresh_token (HttpOnly) }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResponse' }
+        '409': { description: Email ya registrado }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Iniciar sesión
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:    { type: string, format: email }
+                password: { type: string }
+      responses:
+        '200':
+          description: Login correcto
+          headers:
+            Set-Cookie: { schema: { type: string }, description: refresh_token (HttpOnly) }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResponse' }
+        '401': { description: Credenciales inválidas }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Renovar access token
+      description: Usa la cookie `refresh_token`. No requiere Authorization header.
+      security: []
+      responses:
+        '200':
+          description: Nuevo access token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken: { type: string }
+        '401': { description: Refresh token ausente o inválido }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Cerrar sesión (limpia la cookie de refresh)
+      security: []
+      responses:
+        '200': { description: Sesión cerrada }
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Usuario autenticado actual
+      responses:
+        '200':
+          description: Datos del usuario
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ─────────────────────── WEBAUTHN ───────────────────────
+  /auth/webauthn/register-options:
+    post:
+      tags: [WebAuthn]
+      summary: Opciones para registrar una passkey
+      responses: { '200': { description: PublicKeyCredentialCreationOptions } }
+  /auth/webauthn/register-verify:
+    post:
+      tags: [WebAuthn]
+      summary: Verificar el registro de la passkey
+      responses: { '200': { description: Passkey registrada } }
+  /auth/webauthn/authenticate-options:
+    post:
+      tags: [WebAuthn]
+      summary: Opciones para autenticación biométrica
+      security: []
+      responses: { '200': { description: PublicKeyCredentialRequestOptions } }
+  /auth/webauthn/authenticate-verify:
+    post:
+      tags: [WebAuthn]
+      summary: Verificar autenticación biométrica y emitir tokens
+      security: []
+      responses: { '200': { description: Login biométrico correcto } }
+
+  # ─────────────────────── ACCOUNTS ───────────────────────
+  /accounts:
+    get:
+      tags: [Accounts]
+      summary: Listar cuentas activas
+      responses:
+        '200':
+          description: Lista de cuentas
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Account' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Accounts]
+      summary: Crear cuenta
+      description: |
+        Para tarjetas de crédito (`type: CREDIT`) se declara `cutDebt` (deuda al corte inicial);
+        el `currentBalance` se inicializa con ese valor. No se solicita la deuda total.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AccountCreate' }
+      responses:
+        '201':
+          description: Cuenta creada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Account' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /accounts/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Accounts]
+      summary: Detalle de una cuenta (incluye MSI activos)
+      responses:
+        '200': { description: Cuenta, content: { application/json: { schema: { $ref: '#/components/schemas/Account' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Accounts]
+      summary: Actualizar cuenta
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AccountUpdate' }
+      responses:
+        '200': { description: Cuenta actualizada, content: { application/json: { schema: { $ref: '#/components/schemas/Account' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Accounts]
+      summary: Eliminar cuenta (soft delete)
+      responses:
+        '200': { description: Cuenta eliminada }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ───────────────────── TRANSACTIONS ─────────────────────
+  /transactions:
+    get:
+      tags: [Transactions]
+      summary: Listar movimientos (paginado)
+      parameters:
+        - { name: page,       in: query, schema: { type: integer, default: 1 } }
+        - { name: limit,      in: query, schema: { type: integer, default: 30, maximum: 100 } }
+        - { name: from,       in: query, schema: { type: string, format: date-time } }
+        - { name: to,         in: query, schema: { type: string, format: date-time } }
+        - { name: accountId,  in: query, schema: { type: string } }
+        - { name: type,       in: query, schema: { type: string, enum: [INCOME, EXPENSE, TRANSFER] } }
+        - { name: categoryId, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: Página de movimientos
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Transaction' } }
+                  meta:
+                    type: object
+                    properties:
+                      total: { type: integer }
+                      page:  { type: integer }
+                      limit: { type: integer }
+                      pages: { type: integer }
+    post:
+      tags: [Transactions]
+      summary: Crear movimiento
+      description: |
+        Movimiento de cuenta única (INCOME/EXPENSE) o **doble partida** (TRANSFER / pago de TDC)
+        cuando se incluye `destinationAccountId`. Ajusta saldos de forma atómica.
+        - `notes='MSI'` → la deuda se rastrea aparte y NO mueve el saldo.
+        - `notes='TDC_PAYMENT'` → se excluye del resumen mensual.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TransactionCreate' }
+      responses:
+        '201': { description: Movimiento creado, content: { application/json: { schema: { $ref: '#/components/schemas/Transaction' } } } }
+        '404': { description: Cuenta (o destino) no encontrada }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /transactions/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    patch:
+      tags: [Transactions]
+      summary: Actualizar movimiento
+      responses:
+        '200': { description: Actualizado }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Transactions]
+      summary: Eliminar movimiento
+      responses:
+        '200': { description: Eliminado }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /transactions/summary:
+    get:
+      tags: [Transactions]
+      summary: Totales del mes (Dashboard)
+      description: |
+        Suma de ingresos y gastos del rango, **excluyendo** traspasos (`type=TRANSFER`)
+        y pagos de tarjeta (`notes='TDC_PAYMENT'`) para evitar doble contabilidad.
+      parameters:
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to,   in: query, schema: { type: string, format: date-time } }
+      responses:
+        '200':
+          description: Totales
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  totalIncome:  { type: number, example: 25000 }
+                  totalExpense: { type: number, example: 18430.5 }
+                  net:          { type: number, example: 6569.5 }
+
+  # ────────────────────── CATEGORIES ──────────────────────
+  /categories:
+    get:
+      tags: [Categories]
+      summary: Categorías agrupadas por sección
+      description: 'Devuelve un objeto `{ "Hogar": [...], "Ocio": [...] }` ordenado por sección.'
+      responses:
+        '200':
+          description: Categorías agrupadas
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: array
+                  items: { $ref: '#/components/schemas/Category' }
+    post:
+      tags: [Categories]
+      summary: Crear categoría de usuario
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, type]
+              properties:
+                name:  { type: string, maxLength: 60 }
+                type:  { type: string, enum: [INCOME, EXPENSE] }
+                color: { type: string, example: '#6366f1' }
+                icon:  { type: string }
+                group: { type: string, default: Otros }
+      responses:
+        '201': { description: Creada }
+        '409': { description: Ya existe }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /categories/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [Categories]
+      summary: Eliminar categoría de usuario
+      responses:
+        '200': { description: Eliminada }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ───────────────────────── MSI ──────────────────────────
+  /msi:
+    get:
+      tags: [MSI]
+      summary: Listar compras a meses
+      responses:
+        '200': { description: Lista, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/MSICredit' } } } } }
+    post:
+      tags: [MSI]
+      summary: Registrar compra a meses
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accountId, description, totalAmount, months, startDate]
+              properties:
+                accountId:    { type: string }
+                description:  { type: string, maxLength: 200 }
+                vendor:       { type: string }
+                totalAmount:  { type: number }
+                months:       { type: integer, minimum: 1, maximum: 60 }
+                interestRate: { type: number, nullable: true, description: '0–5 (decimal). Vacío = sin intereses (MSI)' }
+                startDate:    { type: string, format: date-time }
+      responses:
+        '201': { description: Creada, content: { application/json: { schema: { $ref: '#/components/schemas/MSICredit' } } } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /msi/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [MSI]
+      summary: Detalle de un MSI
+      responses: { '200': { description: MSI }, '404': { $ref: '#/components/responses/NotFound' } }
+    patch:
+      tags: [MSI]
+      summary: Actualizar MSI (ej. paidMonths, status)
+      responses: { '200': { description: Actualizado }, '404': { $ref: '#/components/responses/NotFound' } }
+    delete:
+      tags: [MSI]
+      summary: Cancelar MSI
+      responses: { '200': { description: Cancelado }, '404': { $ref: '#/components/responses/NotFound' } }
+
+  # ─────────────────── RECURRING INCOME ───────────────────
+  /recurring-income:
+    get:
+      tags: [Recurring Income]
+      summary: Listar ingresos recurrentes
+      responses: { '200': { description: Lista } }
+    post:
+      tags: [Recurring Income]
+      summary: Crear ingreso recurrente
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accountId, amount, description, periodicity, startDate]
+              properties:
+                accountId:         { type: string }
+                amount:            { type: number }
+                description:       { type: string, maxLength: 200 }
+                periodicity:       { type: string, enum: [DAILY, WEEKLY, BIWEEKLY, MONTHLY, BIMONTHLY, QUARTERLY, ANNUAL] }
+                dayOfMonth:        { type: integer, minimum: 1, maximum: 31 }
+                adjustForWeekends: { type: boolean }
+                sourceType:        { type: string, enum: [PAYROLL, FREELANCE, RENTAL, BUSINESS, OTHER] }
+                startDate:         { type: string, format: date-time }
+                endDate:           { type: string, format: date-time }
+      responses:
+        '201': { description: Creado }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /recurring-income/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    patch:
+      tags: [Recurring Income]
+      summary: Actualizar ingreso recurrente
+      responses: { '200': { description: Actualizado }, '404': { $ref: '#/components/responses/NotFound' } }
+    delete:
+      tags: [Recurring Income]
+      summary: Desactivar ingreso recurrente
+      responses: { '200': { description: Desactivado }, '404': { $ref: '#/components/responses/NotFound' } }
+
+  /recurring-income/generate-due:
+    post:
+      tags: [Recurring Income]
+      summary: Generar transacciones de ingresos vencidos
+      responses: { '200': { description: Transacciones generadas } }
+
+  # ───────────────────────── CASH FLOW ────────────────────
+  /cash-flow:
+    get:
+      tags: [Cash Flow]
+      summary: Flujo libre y obligaciones del periodo
+      responses:
+        '200':
+          description: Datos de flujo
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CashFlow' }
+
+  # ─────────────────────── ANÁLISIS ───────────────────────
+  /analisis/gastos:
+    get:
+      tags: [Análisis]
+      summary: Gastos agregados por categoría
+      description: |
+        Alimenta el donut de la pantalla Análisis (leyenda + total al centro).
+        Reglas (idénticas a `/movimientos` para que el total == suma de las filas
+        de un slice):
+        - Sólo `type='EXPENSE'`.
+        - Excluye pagos de tarjeta (`notes='TDC_PAYMENT'`) — null-safe.
+        - **Incluye** filas MSI (`notes='MSI'`) a monto completo (llevan categoría real).
+        - Ignora transacciones de cuentas inactivas (`account.isActive=true`).
+        - Filas sin categoría se agrupan en un bucket sintético "Sin categoría".
+      parameters:
+        - { name: rango, in: query, schema: { type: string, enum: [semana, mes, semestre, anio], default: mes }, description: 'Ventana terminada en "now": semana=7d, mes=1m, semestre=6m, anio=1a' }
+      responses:
+        '200':
+          description: Agregado por categoría
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rango: { type: string, enum: [semana, mes, semestre, anio] }
+                  from:  { type: string, format: date-time }
+                  to:    { type: string, format: date-time }
+                  total: { type: number, description: Total del periodo }
+                  categorias:
+                    type: array
+                    description: Ordenado desc por monto
+                    items:
+                      type: object
+                      properties:
+                        categoriaId: { type: string, nullable: true, description: 'null = Sin categoría' }
+                        nombre:      { type: string }
+                        color:       { type: string }
+                        icon:        { type: string }
+                        monto:       { type: number }
+                        porcentaje:  { type: number, description: '% del total (1 decimal)' }
+                        count:       { type: integer, description: Nº de movimientos }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /movimientos:
+    get:
+      tags: [Análisis]
+      summary: Movimientos de una categoría (detalle del slice)
+      description: |
+        Lista los gastos de una sola categoría en el rango, para el acordeón/detalle
+        de Análisis. Mismo filtro que `/analisis/gastos`, por lo que la suma de filas
+        coincide con el slice del donut.
+      parameters:
+        - { name: categoria_id, in: query, schema: { type: string }, description: 'Omitido / "null" / "none" → bucket "Sin categoría" (categoryId null)' }
+        - { name: rango, in: query, schema: { type: string, enum: [semana, mes, semestre, anio], default: mes } }
+      responses:
+        '200':
+          description: Movimientos de la categoría
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  categoriaId: { type: string, nullable: true }
+                  rango: { type: string, enum: [semana, mes, semestre, anio] }
+                  from:  { type: string, format: date-time }
+                  to:    { type: string, format: date-time }
+                  total: { type: number }
+                  count: { type: integer }
+                  movimientos:
+                    type: array
+                    description: Ordenado por fecha desc
+                    items:
+                      type: object
+                      properties:
+                        id:       { type: string }
+                        fecha:    { type: string, format: date-time }
+                        concepto: { type: string }
+                        monto:    { type: number }
+                        notes:    { type: string, nullable: true }
+                        account:
+                          type: object
+                          properties:
+                            id:    { type: string }
+                            name:  { type: string }
+                            color: { type: string }
+                            type:  { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ───────────────────────── SPLIT ────────────────────────
+  /split:
+    post:
+      tags: [Split]
+      summary: Crear cobro compartido y link
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [concept, totalAmount, bankDetails, participants]
+              properties:
+                concept:     { type: string, maxLength: 200 }
+                totalAmount: { type: number }
+                notes:       { type: string }
+                bankDetails:
+                  type: object
+                  required: [bank]
+                  properties:
+                    bank:  { type: string }
+                    clabe: { type: string }
+                    alias: { type: string }
+                    phone: { type: string }
+                participants:
+                  type: array
+                  minItems: 1
+                  maxItems: 20
+                  items:
+                    type: object
+                    required: [amount]
+                    properties:
+                      userId:     { type: string }
+                      guestName:  { type: string }
+                      guestEmail: { type: string, format: email }
+                      amount:     { type: number }
+      responses:
+        '201': { description: Cobro creado (incluye shareUrl) }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /split/my:
+    get:
+      tags: [Split]
+      summary: Mis cobros creados
+      responses: { '200': { description: Lista de cobros } }
+
+  /split/{token}:
+    parameters:
+      - { name: token, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Split]
+      summary: Detalle público de un cobro (sin auth)
+      security: []
+      responses: { '200': { description: Cobro }, '404': { $ref: '#/components/responses/NotFound' } }
+
+  /split/{token}/pay:
+    parameters:
+      - { name: token, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Split]
+      summary: Marcar pago de un participante (auth o invitado)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [participantId]
+              properties:
+                participantId: { type: string }
+                guestName:     { type: string }
+                guestEmail:    { type: string, format: email }
+      responses:
+        '200': { description: Pago registrado }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  # ─────────────────────── NOTIFICATIONS ──────────────────
+  /notifications/push:
+    post:
+      tags: [Notifications]
+      summary: Suscribirse a push
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint, p256dh, auth]
+              properties:
+                endpoint:  { type: string, format: uri }
+                p256dh:    { type: string }
+                auth:      { type: string }
+                userAgent: { type: string }
+      responses: { '200': { description: Suscripción guardada } }
+    delete:
+      tags: [Notifications]
+      summary: Cancelar suscripción push
+      responses: { '200': { description: Suscripción eliminada } }
+
+  /notifications/vapid-public-key:
+    get:
+      tags: [Notifications]
+      summary: Clave pública VAPID
+      security: []
+      responses: { '200': { description: Clave pública } }
+
+  # ───────────────────────── SYNC ─────────────────────────
+  /sync:
+    post:
+      tags: [Sync]
+      summary: Sincronización offline por lotes
+      description: Procesa hasta 50 acciones encoladas por el Service Worker (Background Sync).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [actions]
+              properties:
+                actions:
+                  type: array
+                  maxItems: 50
+                  items:
+                    type: object
+                    required: [clientId, method, resource]
+                    properties:
+                      clientId: { type: string }
+                      method:   { type: string, enum: [POST, PUT, PATCH, DELETE] }
+                      resource: { type: string, enum: [transactions, accounts] }
+                      payload:  {}
+      responses:
+        '200': { description: Resultado por acción }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 'Access token JWT obtenido en /auth/login o /auth/register'
+
+  responses:
+    Unauthorized:
+      description: Token ausente, inválido o expirado
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Recurso no encontrado
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ValidationError:
+      description: Datos inválidos
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:   { type: string, example: Datos inválidos }
+              details: { type: object, additionalProperties: true }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        code:  { type: string }
+
+    User:
+      type: object
+      properties:
+        id:    { type: string }
+        email: { type: string, format: email }
+        name:  { type: string }
+        plan:  { type: string, enum: [FREE, PREMIUM] }
+
+    AuthResponse:
+      type: object
+      properties:
+        accessToken: { type: string }
+        user:        { $ref: '#/components/schemas/User' }
+
+    Account:
+      type: object
+      properties:
+        id:             { type: string }
+        name:           { type: string }
+        type:           { type: string, enum: [CHECKING, SAVINGS, DEBIT, CREDIT, CASH, INVESTMENT, VOUCHER, FINTECH, DIGITAL_WALLET] }
+        bank:           { type: string, nullable: true }
+        color:          { type: string }
+        icon:           { type: string, nullable: true }
+        isActive:       { type: boolean }
+        currentBalance: { type: number, description: 'TDC: deuda al corte + compras post-corte' }
+        cutDebt:        { type: number, nullable: true, description: 'Deuda al corte del ciclo actual (TDC)' }
+        creditLimit:    { type: number, nullable: true }
+        cutDay:         { type: integer, nullable: true }
+        paymentDueDay:  { type: integer, nullable: true }
+        minimumPayment: { type: number, nullable: true }
+        interestRate:   { type: number, nullable: true }
+        activeInstallments: { type: integer, description: 'MSI activos vinculados' }
+        totalMonthlyMSI:    { type: number, description: 'Suma de mensualidades MSI' }
+
+    AccountCreate:
+      type: object
+      required: [name, type]
+      properties:
+        name:           { type: string, maxLength: 100 }
+        type:           { type: string, enum: [CHECKING, SAVINGS, DEBIT, CREDIT, CASH, INVESTMENT] }
+        bank:           { type: string }
+        lastFourDigits: { type: string, pattern: '^\d{4}$' }
+        color:          { type: string, example: '#6366f1' }
+        icon:           { type: string }
+        notes:          { type: string }
+        currentBalance: { type: number, description: 'Saldo inicial (cuentas no-crédito)' }
+        cutDebt:        { type: number, description: 'Deuda al corte inicial (sólo CREDIT)' }
+        creditLimit:    { type: number }
+        cutDay:         { type: integer, minimum: 1, maximum: 31 }
+        paymentDueDay:  { type: integer, minimum: 1, maximum: 31 }
+        minimumPayment: { type: number }
+        interestRate:   { type: number, minimum: 0, maximum: 5 }
+
+    AccountUpdate:
+      allOf:
+        - $ref: '#/components/schemas/AccountCreate'
+        - type: object
+          properties:
+            isActive: { type: boolean }
+
+    Transaction:
+      type: object
+      properties:
+        id:                { type: string }
+        accountId:         { type: string }
+        categoryId:        { type: string, nullable: true }
+        type:              { type: string, enum: [INCOME, EXPENSE, TRANSFER] }
+        amount:            { type: number }
+        description:       { type: string }
+        date:              { type: string, format: date-time }
+        notes:             { type: string, nullable: true, description: "'MSI', 'TDC_PAYMENT', 'RECUR:<freq>' o libre" }
+        transferAccountId: { type: string, nullable: true, description: 'Cuenta destino (transferencias/pago TDC)' }
+        syncStatus:        { type: string, enum: [SYNCED, PENDING, CONFLICT] }
+        account:           { type: object, nullable: true }
+        category:          { type: object, nullable: true }
+
+    TransactionCreate:
+      type: object
+      required: [accountId, type, amount, description, date]
+      properties:
+        accountId:            { type: string }
+        categoryId:           { type: string }
+        type:                 { type: string, enum: [INCOME, EXPENSE, TRANSFER] }
+        amount:               { type: number, minimum: 0.01 }
+        description:          { type: string, maxLength: 200 }
+        date:                 { type: string, format: date-time }
+        notes:                { type: string, maxLength: 500 }
+        clientId:             { type: string, description: 'Para deduplicación offline' }
+        destinationAccountId: { type: string, description: 'Cuenta destino (TRANSFER / pago de TDC)' }
+
+    Category:
+      type: object
+      properties:
+        id:       { type: string }
+        name:     { type: string }
+        type:     { type: string, enum: [INCOME, EXPENSE] }
+        color:    { type: string }
+        icon:     { type: string, nullable: true }
+        group:    { type: string, example: Hogar }
+        isSystem: { type: boolean }
+
+    MSICredit:
+      type: object
+      properties:
+        id:              { type: string }
+        accountId:       { type: string }
+        description:     { type: string }
+        vendor:          { type: string, nullable: true }
+        totalAmount:     { type: number }
+        months:          { type: integer }
+        monthlyAmount:   { type: number }
+        interestRate:    { type: number, nullable: true }
+        startDate:       { type: string, format: date-time }
+        endDate:         { type: string, format: date-time }
+        paidMonths:      { type: integer }
+        monthsRemaining: { type: integer }
+        progressPercent: { type: integer }
+        pendingTotal:    { type: number }
+        status:          { type: string, enum: [ACTIVE, COMPLETED, CANCELLED] }
+
+    CashFlow:
+      type: object
+      properties:
+        periodStart:      { type: string, format: date-time }
+        periodEnd:        { type: string, format: date-time }
+        totalIncome:      { type: number }
+        totalObligations: { type: number }
+        freeCashFlow:     { type: number }
+        totalBalance:     { type: number }
+        obligations:
+          type: array
+          items:
+            type: object
+            properties:
+              label:   { type: string }
+              amount:  { type: number }
+              dueDate: { type: string, format: date-time }
+              type:    { type: string, enum: [TDC_MINIMUM, MSI, OTHER] }

@@ -1,0 +1,449 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ═══════════════════════════════════════════════
+// AUTH & USUARIOS
+// ═══════════════════════════════════════════════
+
+model User {
+  id             String   @id @default(cuid())
+  email          String   @unique
+  passwordHash   String?
+  name           String
+  avatarUrl      String?
+  encryptionSalt String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  webAuthnCredentials WebAuthnCredential[]
+  subscription        Subscription?
+  pushSubscriptions   PushSubscription[]
+  accounts            Account[]
+  categories          Category[]
+  recurringIncomes    RecurringIncome[]
+  transactions        Transaction[]
+  msiCredits          MSICredit[]
+  splitLinksCreated   SplitLink[]        @relation("SplitCreator")
+  splitParticipations SplitParticipant[] @relation("ParticipantUser")
+  savingsGoals        SavingsGoal[]
+  notifications       Notification[]
+  refreshTokens       RefreshToken[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  revokedAt DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model WebAuthnCredential {
+  id           String    @id @default(cuid())
+  userId       String
+  credentialId String    @unique
+  publicKey    Bytes
+  counter      BigInt    @default(0)
+  deviceType   String
+  transports   String[]
+  createdAt    DateTime  @default(now())
+  lastUsedAt   DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("webauthn_credentials")
+}
+
+model Subscription {
+  id         String           @id @default(cuid())
+  userId     String           @unique
+  plan       SubscriptionPlan @default(FREE)
+  status     SubStatus        @default(ACTIVE)
+  startDate  DateTime         @default(now())
+  endDate    DateTime?
+  provider   String?
+  externalId String?
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("subscriptions")
+}
+
+model PushSubscription {
+  id        String   @id @default(cuid())
+  userId    String
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("push_subscriptions")
+}
+
+// ═══════════════════════════════════════════════
+// BÓVEDA DE CUENTAS
+// ═══════════════════════════════════════════════
+
+model Account {
+  id             String      @id @default(cuid())
+  userId         String
+  name           String
+  type           AccountType
+  bank           String?
+  lastFourDigits String?
+  color          String      @default("#6366f1")
+  icon           String?
+  isActive       Boolean     @default(true)
+  notes          String?
+
+  creditLimit    Decimal? @db.Decimal(15, 2)
+  currentBalance Decimal? @db.Decimal(15, 2)
+  // Deuda al corte: statement balance for the current cycle (TDC only).
+  // Stays fixed for the cycle; regular post-cut purchases grow currentBalance instead.
+  cutDebt        Decimal? @db.Decimal(15, 2)
+  cutDay         Int?
+  paymentDueDay  Int?
+  minimumPayment Decimal? @db.Decimal(15, 2)
+  interestRate   Decimal? @db.Decimal(5, 4)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions     Transaction[]
+  recurringIncomes RecurringIncome[]
+  msiCredits       MSICredit[]
+
+  @@index([userId, type])
+  @@map("accounts")
+}
+
+// ═══════════════════════════════════════════════
+// CATEGORÍAS
+// ═══════════════════════════════════════════════
+
+model Category {
+  id        String       @id @default(cuid())
+  userId    String?
+  name      String
+  type      CategoryType
+  color     String       @default("#6366f1")
+  icon      String?
+  group     String       @default("Otros")
+  isSystem  Boolean      @default(false)
+  createdAt DateTime     @default(now())
+
+  user         User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+
+  @@unique([userId, name, type])
+  @@map("categories")
+}
+
+// ═══════════════════════════════════════════════
+// TRANSACCIONES
+// ═══════════════════════════════════════════════
+
+model Transaction {
+  id                String          @id @default(cuid())
+  userId            String
+  accountId         String
+  categoryId        String?
+  type              TransactionType
+  amount            Decimal         @db.Decimal(15, 2)
+  description       String
+  date              DateTime
+  notes             String?
+  // For transfers / TDC payments: the counterpart account that receives the money
+  transferAccountId String?
+  recurringIncomeId String?
+  clientId          String?         @unique
+  syncStatus        SyncStatus      @default(SYNCED)
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account         Account           @relation(fields: [accountId], references: [id])
+  category        Category?         @relation(fields: [categoryId], references: [id])
+  recurringIncome RecurringIncome?  @relation(fields: [recurringIncomeId], references: [id])
+  splitRecord     SplitParticipant?
+
+  @@index([userId, date])
+  @@index([userId, accountId, date])
+  @@map("transactions")
+}
+
+// ═══════════════════════════════════════════════
+// INGRESOS RECURRENTES (NÓMINA)
+// ═══════════════════════════════════════════════
+
+model RecurringIncome {
+  id                String           @id @default(cuid())
+  userId            String
+  accountId         String
+  amount            Decimal          @db.Decimal(15, 2)
+  description       String
+  periodicity       Periodicity
+  dayOfMonth        Int?             // para MONTHLY: día 1-31; para BIWEEKLY: primer quincena (1-15)
+  adjustForWeekends Boolean          @default(false)  // si cae sáb/dom → viernes anterior
+  sourceType        IncomeSourceType @default(OTHER)
+  startDate         DateTime
+  endDate           DateTime?
+  nextDate          DateTime
+  isActive          Boolean          @default(true)
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account      Account       @relation(fields: [accountId], references: [id])
+  transactions Transaction[]
+
+  @@map("recurring_incomes")
+}
+
+// ═══════════════════════════════════════════════
+// MSI / CRÉDITOS
+// ═══════════════════════════════════════════════
+
+model MSICredit {
+  id            String       @id @default(cuid())
+  userId        String
+  accountId     String
+  description   String
+  vendor        String?
+  totalAmount   Decimal      @db.Decimal(15, 2)
+  months        Int
+  monthlyAmount Decimal      @db.Decimal(15, 2)
+  interestRate  Decimal?     @db.Decimal(5, 4)
+  startDate     DateTime
+  endDate       DateTime
+  paidMonths    Int          @default(0)
+  status        CreditStatus @default(ACTIVE)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account Account @relation(fields: [accountId], references: [id])
+
+  @@index([accountId, status, startDate, endDate])
+  @@map("msi_credits")
+}
+
+// ═══════════════════════════════════════════════
+// MÓDULO SOCIAL — SPLIT LINKS
+// ═══════════════════════════════════════════════
+
+model SplitLink {
+  id          String      @id @default(cuid())
+  creatorId   String
+  token       String      @unique
+  concept     String
+  totalAmount Decimal     @db.Decimal(15, 2)
+  notes       String?
+  bankDetails Json
+  status      SplitStatus @default(PENDING)
+  expiresAt   DateTime
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  creator      User               @relation("SplitCreator", fields: [creatorId], references: [id], onDelete: Cascade)
+  participants SplitParticipant[]
+
+  @@map("split_links")
+}
+
+model SplitParticipant {
+  id            String            @id @default(cuid())
+  splitLinkId   String
+  userId        String?
+  guestName     String?
+  guestEmail    String?
+  amount        Decimal           @db.Decimal(15, 2)
+  status        ParticipantStatus @default(PENDING)
+  paidAt        DateTime?
+  transactionId String?           @unique
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  splitLink   SplitLink    @relation(fields: [splitLinkId], references: [id], onDelete: Cascade)
+  user        User?        @relation("ParticipantUser", fields: [userId], references: [id])
+  transaction Transaction? @relation(fields: [transactionId], references: [id])
+
+  @@map("split_participants")
+}
+
+// ═══════════════════════════════════════════════
+// METAS DE AHORRO (PREMIUM)
+// ═══════════════════════════════════════════════
+
+model SavingsGoal {
+  id            String     @id @default(cuid())
+  userId        String
+  name          String
+  targetAmount  Decimal    @db.Decimal(15, 2)
+  currentAmount Decimal    @db.Decimal(15, 2) @default(0)
+  targetDate    DateTime?
+  color         String     @default("#10b981")
+  icon          String?
+  notes         String?
+  status        GoalStatus @default(ACTIVE)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("savings_goals")
+}
+
+// ═══════════════════════════════════════════════
+// SYNC CONFLICTS — resolución offline/online
+// ═══════════════════════════════════════════════
+
+model SyncConflict {
+  id         String   @id @default(cuid())
+  userId     String
+  entityType String   // "transaction" | "account" | "msi"
+  entityId   String
+  clientData Json
+  serverData Json
+  resolution String?  // "CLIENT_WINS" | "SERVER_WINS" | "MANUAL"
+  resolvedAt DateTime?
+  createdAt  DateTime @default(now())
+
+  @@index([userId, resolvedAt])
+  @@map("sync_conflicts")
+}
+
+// ═══════════════════════════════════════════════
+// NOTIFICACIONES
+// ═══════════════════════════════════════════════
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  type      NotificationType
+  title     String
+  body      String
+  data      Json?
+  isRead    Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead, createdAt])
+  @@map("notifications")
+}
+
+// ═══════════════════════════════════════════════
+// ENUMS
+// ═══════════════════════════════════════════════
+
+enum SubscriptionPlan {
+  FREE
+  PREMIUM
+}
+
+enum SubStatus {
+  ACTIVE
+  CANCELLED
+  EXPIRED
+  TRIAL
+}
+
+enum AccountType {
+  CHECKING
+  SAVINGS
+  DEBIT
+  CREDIT
+  CASH
+  INVESTMENT
+}
+
+enum CategoryType {
+  INCOME
+  EXPENSE
+}
+
+enum TransactionType {
+  INCOME
+  EXPENSE
+  TRANSFER
+}
+
+enum Periodicity {
+  DAILY
+  WEEKLY
+  BIWEEKLY
+  MONTHLY
+  BIMONTHLY
+  QUARTERLY
+  ANNUAL
+}
+
+enum IncomeSourceType {
+  PAYROLL
+  FREELANCE
+  RENTAL
+  BUSINESS
+  OTHER
+}
+
+enum SyncStatus {
+  SYNCED
+  PENDING
+  CONFLICT
+}
+
+enum CreditStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum SplitStatus {
+  PENDING
+  PARTIAL
+  COMPLETED
+  EXPIRED
+}
+
+enum ParticipantStatus {
+  PENDING
+  PAID
+  CANCELLED
+}
+
+enum GoalStatus {
+  ACTIVE
+  COMPLETED
+  PAUSED
+  CANCELLED
+}
+
+enum NotificationType {
+  SPLIT_PAID
+  SPLIT_REMINDER
+  PAYMENT_DUE
+  INCOME_EXPECTED
+  GOAL_REACHED
+  SYSTEM
+}
